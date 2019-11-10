@@ -3,6 +3,7 @@ title: "Raport z analizy zmiany w rozmiarze wyławianego Śledzia Oceanicznego"
 author: "Witold Kupś"
 output: 
   html_document:
+    keep_md: true
     toc: true
     toc_float: true
 date: "`r format(Sys.time(), '%d %B, %Y')`"
