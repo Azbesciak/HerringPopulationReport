@@ -1,0 +1,103 @@
+---
+title: "Raport z analizy zmiany w rozmiarze wyławianego Śledzia Oceanicznego"
+author: "Witold Kupś"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+# Abstrakt
+
+# Wprowadzenie
+
+Na przestrzeni ostatnich lat zauważono stopniowy spadek rozmiaru śledzia oceanicznego wyławianego w Europie. Do analizy zebrano pomiary śledzi i warunków w jakich żyją z ostatnich 60 lat. Dane były pobierane z połowów komercyjnych jednostek. W ramach połowu jednej jednostki losowo wybierano od 50 do 100 sztuk trzyletnich śledzi.
+
+### Inicjalizacja środowiska
+```{r, echo = FALSE}
+library(ggplot2)
+library(dplyr)
+library(DT)
+
+# ustawmy seed'a dla randoma w celu powtarzalności wyników
+set.seed(1234)
+
+```
+
+Zainicjujmy róWnież funkcje pomocnicze do prezentacji danych
+```{r}
+prettyTable <- function(table_df, round_columns=numeric(), round_digits=2) {
+    DT::datatable(table_df, style="bootstrap", filter = "top", rownames = FALSE, extensions = "Buttons", options = list(dom = 'Bfrtip', buttons = c('copy', 'csv', 'excel', 'pdf', 'print'))) %>%
+    formatRound(round_columns, round_digits)
+}
+```
+
+
+
+### Import danych
+
+Dane znajdują się w pliku `sledzie.csv` załączonym w repozytorium. Opisy ich atrybutów można znaleźć w [treści zadania](http://www.cs.put.poznan.pl/alabijak/emd/projekt/projekt_analiza.html); dla wygody jednak zamieszczono go również poniżej:
+
+Kolejne kolumny w zbiorze danych to:
+
+- length: długość złowionego śledzia [cm];
+- cfin1: dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 1];
+- cfin2: dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 2];
+- chel1: dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 1];
+- chel2: dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 2];
+- lcop1: dostępność planktonu [zagęszczenie widłonogów gat. 1];
+- lcop2: dostępność planktonu [zagęszczenie widłonogów gat. 2];
+- fbar: natężenie połowów w regionie [ułamek pozostawionego narybku];
+- recr: roczny narybek [liczba śledzi];
+- cumf: łączne roczne natężenie połowów w regionie [ułamek pozostawionego narybku];
+- totaln: łączna liczba ryb złowionych w ramach połowu [liczba śledzi];
+- sst: temperatura przy powierzchni wody [°C];
+- sal: poziom zasolenia wody [Knudsen ppt];
+- xmonth: miesiąc połowu [numer miesiąca];
+- nao: oscylacja północnoatlantycka [mb].
+
+Wiersze w zbiorze są uporządkowane chronologicznie.
+```{r}
+sourceDataFileName <- "sledzie.csv"
+```
+
+Dokonajmy wstępnego wczytania danych - pierwszych 100 wierszy w celu automatycznego określenia klasy oraz podglądu danych
+```{r}
+initialHerringData <- read.csv(sourceDataFileName, nrows = 100)
+classes <- sapply(initialHerringData, class)
+classes
+```
+Jak widać, większość danych została zakwalifikowana jako factor mimo, że z opisu wynika, że są to liczby. Wczytajmy zatem cały plik w odpowiednich klasach - wartości brakujące reprezentuje `?`, natomiast jako separator dziesiętny przyjmujemy kropkę `.`. Plik nie zawiera również komentarzy.
+Szybka analiza pliku pozwoliła również na identyfikację, że zbiór składa się z około 52.6 tys wierszy - informację tą wykorzystamy w celu przyśpieszenia importu.
+```{r}
+classes <- c("NULL", rep(c("numeric"), 13), "factor", "numeric")
+herringData <- read.csv(sourceDataFileName, comment.char = "", header=TRUE, colClasses = classes, nrows=52600, dec = ".", na.strings = c("?"))
+```
+
+
+# Omówienie danych
+Sprawdzmy czy rozmiary zbioru pokrywają się z oczekiwaniami
+```{r}
+dim(herringData)
+```
+
+Wygląda na to, że dane zostały poprawnie wczytane.
+Zobaczmy je więc
+```{r}
+prettyTable(head(herringData, n = 100))
+```
+
+
+Następnie przeprowadzmy krótkie podsumowanie
+```{r}
+summary(herringData)
+```
+Jak widać, śledzie mają długość w przedziale 19-32.5 cm, z medianą ustaloną dla wartości 25.5 cm, najwięcej śledzi wyławia się w sierpniu, październiku oraz lipcu. Można również stwierdzić, że liczba brakujących danych dla pól *cfin*, *chel1*, *lcop* oraz *sst* jest porównywalna; dla innych column wszystkie dane są określone. 
+Możemy również zwrócić uwagę na wielkość połowów - ich liczba mieści się w przedziale 14.4 - 101.6 tys z medianą na poziomie 54 tys oraz średnią 51.5 tys. Rozkład ten jest więc prawdopodobnie zbliżony do normalnego, co z resztą możemy sprawdzić.
+
+```{r}
+#ggplot(, aes(hwy, fill=drv))
+herringData$totaln
+```
+
+
