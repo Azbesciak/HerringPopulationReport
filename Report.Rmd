@@ -2,9 +2,10 @@
 title: "Raport z analizy zmiany w rozmiarze wyławianego Śledzia Oceanicznego"
 author: "Witold Kupś"
 output: 
-  html_document:
+  html_notebook:
     toc: true
     toc_float: true
+  github_document: default
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 ---
 # Abstrakt
@@ -14,25 +15,25 @@ date: "`r format(Sys.time(), '%d %B, %Y')`"
 Na przestrzeni ostatnich lat zauważono stopniowy spadek rozmiaru śledzia oceanicznego wyławianego w Europie. Do analizy zebrano pomiary śledzi i warunków w jakich żyją z ostatnich 60 lat. Dane były pobierane z połowów komercyjnych jednostek. W ramach połowu jednej jednostki losowo wybierano od 50 do 100 sztuk trzyletnich śledzi.
 
 ### Inicjalizacja środowiska
-```{r, echo = FALSE}
+```{r, echo = TRUE, results='hide'}
 library(ggplot2)
 library(dplyr)
 library(DT)
-
+library(GGally)
+library(magick)
+library(cowplot)
 # ustawmy seed'a dla randoma w celu powtarzalności wyników
 set.seed(1234)
-
 ```
 
-Zainicjujmy róWnież funkcje pomocnicze do prezentacji danych
+Zainicjujmy również funkcje pomocnicze do prezentacji danych
 ```{r}
 prettyTable <- function(table_df, round_columns=numeric(), round_digits=2) {
-    DT::datatable(table_df, style="bootstrap", filter = "top", rownames = FALSE, extensions = "Buttons", options = list(dom = 'Bfrtip', buttons = c('copy', 'csv', 'excel', 'pdf', 'print'))) %>%
+    DT::datatable(table_df, style="bootstrap", filter = "top", rownames = FALSE, extensions = "Buttons",
+                  options = list(dom = 'Bfrtip', buttons = c('copy', 'csv', 'excel', 'pdf', 'print'))) %>%
     formatRound(round_columns, round_digits)
 }
 ```
-
-
 
 ### Import danych
 
@@ -96,8 +97,169 @@ Jak widać, śledzie mają długość w przedziale 19-32.5 cm, z medianą ustalo
 Możemy również zwrócić uwagę na wielkość połowów - ich liczba mieści się w przedziale 14.4 - 101.6 tys z medianą na poziomie 54 tys oraz średnią 51.5 tys. Rozkład ten jest więc prawdopodobnie zbliżony do normalnego, co z resztą możemy sprawdzić.
 
 ```{r}
-#ggplot(, aes(hwy, fill=drv))
-herringData$totaln
+  ggplot(data=herringData, aes(x=totaln)) +
+  geom_density() +
+  labs(x = "Wielkość połowu", y = "Gęstość") +
+  theme_bw()
+```
+Niekoniecznie - nie przypomina on żadnego z popularnych rozkładów.
+
+Mamy za zadanie zweryfikować, czy przez ostatnie kilka lat rozmiar śledzia spadł. Przydatny może okazać sie więc wykres prezentujący średni rozmiar na rok. Jest jednak jeden problem - w danych mamy jedynie miesiąc połowu, informację o tym, że są to dane chronologicznie posortowane oraz pochodzą z ostatnich 60 lat. Należy więc w miarę możliwości dodać rok do danych bazując na tych informacjach.
+Sprawdzmy jednak czy nie ma wśród tych danych brakujących wartości
+```{r}
+sum(is.na(herringData$xmonth))
+```
+brak - możemy więc przejść dalej.
+Dane są chronologiczne, także powinniśmy być w stanie wywnioskować rok na podstawie zmiany miesiąca na mniejszy
+
+```{r}
+evaluateYearByMonthChange <- function(fishing) {
+  curYear <- 0
+  recentMonth <- 0
+  l <- lapply(fishing, function(v) {
+    v<- as.integer(v)
+    if (v < recentMonth)
+      curYear <<- curYear + 1
+    recentMonth <<- v
+    curYear
+  })
+  unlist(l)
+}
+
+herringDataWithYearByMonthChange <- mutate(herringData, year=evaluateYearByMonthChange(xmonth))
+herringDataWithYearByMonthChange
+```
+Pogrupujmy je po roku dzięki funkcji
+```{r}
+statsInYear <- function(dataWithYear) {
+  dataWithYear %>%
+    group_by(year) %>%
+    summarise_at(vars(length), funs(mean(., na.rm=TRUE), min = mean - sd(., na.rm= TRUE), max = mean + sd(., na.rm= TRUE)))
+}
+
+meanLengthInYearChart <- function(dataWithYear) {
+  meanPerYear <- statsInYear(dataWithYear)
+  ggplot(data=meanPerYear, aes(x = year, y = mean)) +
+    geom_ribbon(aes(ymin = min, ymax = max), alpha = 0.5, fill = "darkseagreen3", color = "transparent") +
+      geom_line(color = "aquamarine4", lwd = 0.7) + 
+    labs(x = "Rok", y = "Długość śledzia") +
+  theme_bw()
+}
 ```
 
+```{r}
+meanLengthInYearChart(herringDataWithYearByMonthChange)
+```
+Założenie o chronologii jak widać okazało się błędne, przynajmniej w zakresie kolejności miesięcy. Jest również pole `recr` mówiące o połowie w roku. Widzimy, ze występuje pewna powtarzalność, więc jeśli dane byłyby chronologiczne, a zarazem ich rozpiętość jest całkiem spora, powinno to pozwolić na zgrupowanie.
+```{r}
+evaluateYear <- function(fishing) {
+  curYear <- 0
+  recentYearFishing <- 0
+  l <- lapply(fishing, function(v) {
+    if (v != recentYearFishing)
+      curYear <<- curYear + 1
+    recentYearFishing <<- v
+    curYear
+  })
+  unlist(l)
+}
+
+herringDataWithYearByRecr <- mutate(herringData, year=evaluateYear(recr))
+herringDataWithYearByRecr
+```
+```{r}
+meanLengthInYearChart(herringDataWithYearByRecr)
+```
+Niestety, ponownie porażka. W takim razie może po prostu sprawdzmy czy występuje trend w czystych danych:
+```{r}
+ggplot(herringData, aes(x=as.numeric(row.names(herringData)), y=herringData$length)) +
+  geom_line(color = "aquamarine4") +
+  labs(x = "Rok", y = "Długość śledzia") + 
+  theme_bw()
+```
+Dobrze, jakąś zależność widać - może aby być jej pewnym uśrednijmy dane stosując prawo wielkich liczb oraz wiedzę o tym, że mamy do czynienia z danymi z okresu 60 lat
+```{r}
+expectedYears <- 60
+expectedRowsPerYears <- nrow(herringData) %/% 60
+herringDataWithYearByPeriod <- herringData %>%
+  mutate(year = 1:n() %/% expectedRowsPerYears)
+herringDataWithYearByPeriod
+```
+```{r}
+meanLengthInYearChart(herringDataWithYearByPeriod)
+```
+Widzimy więc, że w rzeczywistości istnieje istotny spadek średniej długości śledzia na przełomie lat. Możemy to zwizualizować.
+```{r}
+img <- image_read("herring.svg")
+img <- image_trim(img)
+heightRatio <- 110/475
+maxWidth = 542
+maxHeight <- heightRatio * maxWidth
+herringsImgs <- statsInYear(herringDataWithYearByPeriod) %>%
+  apply(1, function(r) {
+    newWidth <- round((r[[2]] - 10) * 30)
+    widthDif <- round((maxWidth - newWidth)/2)
+    heightDif <- round(widthDif * heightRatio)
+    image_scale(img, newWidth) %>%
+        image_border("white", paste(c(widthDif, "x", heightDif), collapse = "")) %>%
+        image_annotate(paste(c("Rok: ", r[[1]]), collapse = ""), color = "black", size = 30)
+  })
+frames <- image_morph(image_join(herringsImgs), frames = 1)
+anim <- image_animate(frames, fps = 10)
+image_write(anim, "herring.gif")
+```
+
+![](herring.gif)
+
+Zidentyfikujmy możliwe powody takiego zachowania wyznaczając macierz korelacji.
+
+Wcześniej jednak należy zmienić typ kolumny `xmonth` z powrotem na liczbę i przygotować dane.
+```{r}
+herringDataWithNumericMonth = mutate(herringData, xmonth = as.numeric(xmonth))
+```
+Zobaczmy wynik w bardziej przyjaznej formie
+```{r}
+ggcorr(
+  herringDataWithNumericMonth,
+  nbreaks = 9,
+  label = TRUE,
+  label_size = 3,
+  color = "grey50",
+  layout.exp = 1,
+  hjust = 0.75,
+)
+```
+Widać dużą korelację pomiędzy parami `chel1` - `lcop1`, `chel2` - `lcop2`, `fbar` - `cumf`, `cfin2` - `lcop2` oraz `cumf` - `totaln`. Na samą długość w największym stopniu wpływa `sst`, `nao` oraz `fbar`.
+Widzimy że `lcop1`, `lcop2` oraz `cumf` mogą zostać pominięte w procesie dalszej analizy jako redundantne. Teoretycznie moglibyśmy również usunąć miesiąc ze względu na powtarzalność, ale może mieć on wpływ na cykl rozwojowy, więc pozostawmy go póki co.
+```{r}
+filteredHerringDataWithNumericMonth <- select(herringDataWithNumericMonth, -c(lcop1, lcop2, cumf))
+```
+
+
+Zobaczmy jeszcze jak przebiega zależność pomiędzy najbardziej obiecującymi zmiennymi na długość; kolorami wyróżniono również miesiące
+```{r}
+numericChart <- function(colName) {
+  ggplot(herringData, aes(x = length, y = herringData[[colName]], color=xmonth)) +
+    geom_jitter(size = 1.5, stat = "identity") +
+    labs(x = "Długość", y = colName)
+}
+```
+
+```{r}
+plot_grid(
+  numericChart("chel1"),
+  numericChart("fbar"),
+  numericChart("sst"),
+  numericChart("nao")
+)
+```
+
+Powiązanie rosnącego `sst` oraz `nao` jasno wpływa negatywnie na długość, przy `fbar` również można dostrzec pozywytną korelację.
+
+Sprawdzmy również zależność pomiędzy miesiącem połowu a długością; w macierzy korelacji nie mogliśmy tego do konca zweryfikować, jednak ze względu na cykliczność było to również utrudnione (miesiąc w tym wypadku jest sztucznie liczbą).
+
+```{r}
+numericChart("xmonth")
+```
+Wydaje się, że nie ma żadnej znaczącej zależności pomiędzy miesiącem połowu a długością śledzia
 
