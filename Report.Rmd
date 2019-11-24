@@ -9,10 +9,11 @@ output:
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 ---
 # Abstrakt
+Raport ten dotyczy analizy malejącej tendencji rozmiaru Śledzia Oceanicznego na przestrzeni ostatnich lat. Podejmuję tutaj próbę identyfikacji mających na to największy wpływ czynników na bazie zbioru ponad 52 tysięcy obserwacji zebranych w ciągu 60 lat. Analiza prowadzona jest bazując na podejściu zarówno czysto statystyczno-analitycznym z licznymi wizualizacjami, jak i przy wykorzystaniu kilku regresorów - Knn, Random Forest oraz Extreme Gradien Boosting.
 
 # Wprowadzenie
 
-Na przestrzeni ostatnich lat zauważono stopniowy spadek rozmiaru śledzia oceanicznego wyławianego w Europie. Do analizy zebrano pomiary śledzi i warunków w jakich żyją z ostatnich 60 lat. Dane były pobierane z połowów komercyjnych jednostek. W ramach połowu jednej jednostki losowo wybierano od 50 do 100 sztuk trzyletnich śledzi.
+Na przestrzeni ostatnich lat zauważono stopniowy spadek rozmiaru śledzia oceanicznego wyławianego w Europie. Do analizy sytuacji zebrano pomiary śledzi oraz ich środowiska w ostatnich 60 latach. Dane pochodzą z połowów komercyjnych jednostek. W ramach połowu jednej jednostki losowo wybierano od 50 do 100 sztuk trzyletnich śledzi; każdy z takich śledzi stanowi jedną obserwację.
 
 ### Inicjalizacja środowiska
 ```{r, echo = TRUE, results='hide'}
@@ -22,17 +23,12 @@ library(DT)
 library(GGally)
 library(magick)
 library(cowplot)
+library(caret)
+library(readxl)
+library(xgboost)
+library(randomForest)
 # ustawmy seed'a dla randoma w celu powtarzalności wyników
 set.seed(1234)
-```
-
-Zainicjujmy również funkcje pomocnicze do prezentacji danych
-```{r}
-prettyTable <- function(table_df, round_columns=numeric(), round_digits=2) {
-    DT::datatable(table_df, style="bootstrap", filter = "top", rownames = FALSE, extensions = "Buttons",
-                  options = list(dom = 'Bfrtip', buttons = c('copy', 'csv', 'excel', 'pdf', 'print'))) %>%
-    formatRound(round_columns, round_digits)
-}
 ```
 
 ### Import danych
@@ -69,7 +65,7 @@ classes <- sapply(initialHerringData, class)
 classes
 ```
 Jak widać, większość danych została zakwalifikowana jako factor mimo, że z opisu wynika, że są to liczby. Wczytajmy zatem cały plik w odpowiednich klasach - wartości brakujące reprezentuje `?`, natomiast jako separator dziesiętny przyjmujemy kropkę `.`. Plik nie zawiera również komentarzy.
-Szybka analiza pliku pozwoliła również na identyfikację, że zbiór składa się z około 52.6 tys wierszy - informację tą wykorzystamy w celu przyśpieszenia importu.
+Szybka analiza pliku pozwoliła również na identyfikację, że zbiór składa się z około 52.6 tys wierszy - informację tą wykorzystamy w celu przyśpieszenia importu. Pomińmy również pierwszą kolumnę stanowiącą o indeksie.
 ```{r}
 classes <- c("NULL", rep(c("numeric"), 13), "factor", "numeric")
 herringData <- read.csv(sourceDataFileName, comment.char = "", header=TRUE, colClasses = classes, nrows=52600, dec = ".", na.strings = c("?"))
@@ -77,39 +73,60 @@ herringData <- read.csv(sourceDataFileName, comment.char = "", header=TRUE, colC
 
 
 # Omówienie danych
+### Weryfikacja zbioru
 Sprawdzmy czy rozmiary zbioru pokrywają się z oczekiwaniami
 ```{r}
 dim(herringData)
 ```
 
 Wygląda na to, że dane zostały poprawnie wczytane.
-Zobaczmy je więc
+Zobaczmy więc z czym mamy do czynienia
+
 ```{r}
-prettyTable(head(herringData, n = 100))
+herringData
 ```
 
-
+### Analiza zbioru
 Następnie przeprowadzmy krótkie podsumowanie
 ```{r}
 summary(herringData)
 ```
-Jak widać, śledzie mają długość w przedziale 19-32.5 cm, z medianą ustaloną dla wartości 25.5 cm, najwięcej śledzi wyławia się w sierpniu, październiku oraz lipcu. Można również stwierdzić, że liczba brakujących danych dla pól *cfin*, *chel1*, *lcop* oraz *sst* jest porównywalna; dla innych column wszystkie dane są określone. 
+Jak widać, śledzie mają długość w przedziale 19-32.5 cm, z medianą ustaloną dla wartości 25.5 cm, najwięcej śledzi wyławia się w sierpniu, październiku oraz lipcu. Można również stwierdzić, że liczba brakujących danych dla pól *cfin*, *chel1*, *lcop* oraz *sst* jest porównywalna; dla innych column wszystkie dane są określone. Spróbujmy więc usunąć te wiersze, które je zawierają
+```{r}
+dim(herringData %>% na.omit())
+```
+Zostało usuniętych około 10 tysięcy przykładów; nie jest to więc rozwiązanie, jakiego szukamy. Możemy zastąpić wartości brakujące średnią.
+```{r}
+naMeanHerringData <- herringData %>%
+  mutate(# DRY <3
+    cfin1 = ifelse(is.na(cfin1), mean(cfin1, na.rm=TRUE), cfin1),
+    cfin2 = ifelse(is.na(cfin2), mean(cfin2, na.rm=TRUE), cfin2),
+    chel1 = ifelse(is.na(chel1), mean(chel1, na.rm=TRUE), chel1),
+    chel2 = ifelse(is.na(chel2), mean(chel2, na.rm=TRUE), chel2),
+    lcop1 = ifelse(is.na(lcop1), mean(lcop1, na.rm=TRUE), lcop1),
+    lcop2 = ifelse(is.na(lcop2), mean(lcop2, na.rm=TRUE), lcop2),
+    sst = ifelse(is.na(sst), mean(sst, na.rm=TRUE), sst)
+  )
+```
+
+```{r}
+summary(naMeanHerringData)
+```
+Zostańmy więc z tym rozwiązaniem, chociaż prawdopodobnie dobrze byłoby brać średnią z wiersza wcześniej i później, jednak niesie to ze sobą również inne problemy.
+
 Możemy również zwrócić uwagę na wielkość połowów - ich liczba mieści się w przedziale 14.4 - 101.6 tys z medianą na poziomie 54 tys oraz średnią 51.5 tys. Rozkład ten jest więc prawdopodobnie zbliżony do normalnego, co z resztą możemy sprawdzić.
 
 ```{r}
-  ggplot(data=herringData, aes(x=totaln)) +
-  geom_density() +
-  labs(x = "Wielkość połowu", y = "Gęstość") +
+  ggplot(data=naMeanHerringData, aes(x=totaln)) +
+  geom_density(color = "aquamarine4", lwd = 0.7) +
+  labs(x = "Wielkość połowu", y = "Gęstość prawdopodobieństwa") +
   theme_bw()
 ```
 Niekoniecznie - nie przypomina on żadnego z popularnych rozkładów.
 
+### Weryfikacja tendencji
 Mamy za zadanie zweryfikować, czy przez ostatnie kilka lat rozmiar śledzia spadł. Przydatny może okazać sie więc wykres prezentujący średni rozmiar na rok. Jest jednak jeden problem - w danych mamy jedynie miesiąc połowu, informację o tym, że są to dane chronologicznie posortowane oraz pochodzą z ostatnich 60 lat. Należy więc w miarę możliwości dodać rok do danych bazując na tych informacjach.
-Sprawdzmy jednak czy nie ma wśród tych danych brakujących wartości
-```{r}
-sum(is.na(herringData$xmonth))
-```
-brak - możemy więc przejść dalej.
+
 Dane są chronologiczne, także powinniśmy być w stanie wywnioskować rok na podstawie zmiany miesiąca na mniejszy
 
 ```{r}
@@ -126,23 +143,29 @@ evaluateYearByMonthChange <- function(fishing) {
   unlist(l)
 }
 
-herringDataWithYearByMonthChange <- mutate(herringData, year=evaluateYearByMonthChange(xmonth))
+herringDataWithYearByMonthChange <- mutate(naMeanHerringData, year=evaluateYearByMonthChange(xmonth))
 herringDataWithYearByMonthChange
 ```
 Pogrupujmy je po roku dzięki funkcji
 ```{r}
-statsInYear <- function(dataWithYear) {
-  dataWithYear %>%
-    group_by(year) %>%
-    summarise_at(vars(length), funs(mean(., na.rm=TRUE), min = mean - sd(., na.rm= TRUE), max = mean + sd(., na.rm= TRUE)))
+
+getSummaryFuncions <- function() {
+  funs(mean = mean(., na.rm=TRUE), min = mean - sd(., na.rm= TRUE), max = mean + sd(., na.rm= TRUE))
 }
 
-meanLengthInYearChart <- function(dataWithYear) {
-  meanPerYear <- statsInYear(dataWithYear)
+statsInYear <- function(dataWithYear, var) {
+  dataWithYear %>%
+    group_by(year) %>%
+    summarise_at(vars(var), getSummaryFuncions())
+}
+
+
+meanLengthInYearChart <- function(dataWithYear, var = "length", title = "Długość śledzia", color = "aquamarine4", fill = "darkseagreen3") {
+  meanPerYear <- statsInYear(dataWithYear, var)
   ggplot(data=meanPerYear, aes(x = year, y = mean)) +
-    geom_ribbon(aes(ymin = min, ymax = max), alpha = 0.5, fill = "darkseagreen3", color = "transparent") +
-      geom_line(color = "aquamarine4", lwd = 0.7) + 
-    labs(x = "Rok", y = "Długość śledzia") +
+    geom_ribbon(aes(ymin = min, ymax = max), alpha = 0.5, fill = fill, color = "transparent") +
+      geom_line(color = color, lwd = 0.7) + 
+    labs(x = "Rok", y = title) +
   theme_bw()
 }
 ```
@@ -150,7 +173,7 @@ meanLengthInYearChart <- function(dataWithYear) {
 ```{r}
 meanLengthInYearChart(herringDataWithYearByMonthChange)
 ```
-Założenie o chronologii jak widać okazało się błędne, przynajmniej w zakresie kolejności miesięcy. Jest również pole `recr` mówiące o połowie w roku. Widzimy, ze występuje pewna powtarzalność, więc jeśli dane byłyby chronologiczne, a zarazem ich rozpiętość jest całkiem spora, powinno to pozwolić na zgrupowanie.
+Można dostrzec malejącą tendencję w przez "ostatnie lata" (łącznie prawie 2000 zamiast 60), jednak założenie o chronologii jak widać okazało się błędne - przynajmniej w zakresie kolejności miesięcy. Jest również pole `recr` mówiące o połowie w roku. Widzimy, że występuje pewna powtarzalność, więc jeśli dane byłyby chronologiczne, a zarazem ich rozpiętość jest całkiem spora, powinno to pozwolić na zgrupowanie.
 ```{r}
 evaluateYear <- function(fishing) {
   curYear <- 0
@@ -164,7 +187,7 @@ evaluateYear <- function(fishing) {
   unlist(l)
 }
 
-herringDataWithYearByRecr <- mutate(herringData, year=evaluateYear(recr))
+herringDataWithYearByRecr <- mutate(naMeanHerringData, year=evaluateYear(recr))
 herringDataWithYearByRecr
 ```
 ```{r}
@@ -172,30 +195,30 @@ meanLengthInYearChart(herringDataWithYearByRecr)
 ```
 Niestety, ponownie porażka. W takim razie może po prostu sprawdzmy czy występuje trend w czystych danych:
 ```{r}
-ggplot(herringData, aes(x=as.numeric(row.names(herringData)), y=herringData$length)) +
+ggplot(naMeanHerringData, aes(x=as.numeric(row.names(naMeanHerringData)), y=naMeanHerringData$length)) +
   geom_line(color = "aquamarine4") +
   labs(x = "Rok", y = "Długość śledzia") + 
   theme_bw()
 ```
-Dobrze, jakąś zależność widać - może aby być jej pewnym uśrednijmy dane stosując prawo wielkich liczb oraz wiedzę o tym, że mamy do czynienia z danymi z okresu 60 lat
+Dobrze, jakąś zależność widać - może aby być jej pewnym uśrednijmy dane licząc na prawo wielkich liczb oraz wiedzę o tym, że mamy do czynienia z danymi z okresu 60 lat
 ```{r}
 expectedYears <- 60
-expectedRowsPerYears <- nrow(herringData) %/% 60
-herringDataWithYearByPeriod <- herringData %>%
+expectedRowsPerYears <- nrow(naMeanHerringData) %/% 60
+herringDataWithYearByPeriod <- naMeanHerringData %>%
   mutate(year = 1:n() %/% expectedRowsPerYears)
 herringDataWithYearByPeriod
 ```
-```{r}
+```{r, cache=TRUE}
 meanLengthInYearChart(herringDataWithYearByPeriod)
 ```
 Widzimy więc, że w rzeczywistości istnieje istotny spadek średniej długości śledzia na przełomie lat. Możemy to zwizualizować.
-```{r}
+```{r, cache=TRUE}
 img <- image_read("herring.svg")
 img <- image_trim(img)
 heightRatio <- 110/475
 maxWidth = 542
 maxHeight <- heightRatio * maxWidth
-herringsImgs <- statsInYear(herringDataWithYearByPeriod) %>%
+herringsImgs <- statsInYear(herringDataWithYearByPeriod, "length") %>%
   apply(1, function(r) {
     newWidth <- round((r[[2]] - 10) * 30)
     widthDif <- round((maxWidth - newWidth)/2)
@@ -211,13 +234,14 @@ image_write(anim, "herring.gif")
 
 ![](herring.gif)
 
+### Analiza statystyczna
 Zidentyfikujmy możliwe powody takiego zachowania wyznaczając macierz korelacji.
 
 Wcześniej jednak należy zmienić typ kolumny `xmonth` z powrotem na liczbę i przygotować dane.
 ```{r}
-herringDataWithNumericMonth = mutate(herringData, xmonth = as.numeric(xmonth))
+herringDataWithNumericMonth = mutate(naMeanHerringData, xmonth = as.numeric(xmonth))
 ```
-Zobaczmy wynik w bardziej przyjaznej formie
+Zobaczmy możliwe zależności w bardziej przyjaznej formie
 ```{r}
 ggcorr(
   herringDataWithNumericMonth,
@@ -231,21 +255,22 @@ ggcorr(
 ```
 Widać dużą korelację pomiędzy parami `chel1` - `lcop1`, `chel2` - `lcop2`, `fbar` - `cumf`, `cfin2` - `lcop2` oraz `cumf` - `totaln`. Na samą długość w największym stopniu wpływa `sst`, `nao` oraz `fbar`.
 Widzimy że `lcop1`, `lcop2` oraz `cumf` mogą zostać pominięte w procesie dalszej analizy jako redundantne. Teoretycznie moglibyśmy również usunąć miesiąc ze względu na powtarzalność, ale może mieć on wpływ na cykl rozwojowy, więc pozostawmy go póki co.
-```{r}
+```{r, cache=TRUE}
 filteredHerringDataWithNumericMonth <- select(herringDataWithNumericMonth, -c(lcop1, lcop2, cumf))
 ```
 
 
 Zobaczmy jeszcze jak przebiega zależność pomiędzy najbardziej obiecującymi zmiennymi na długość; kolorami wyróżniono również miesiące
-```{r}
+```{r, cache=TRUE}
 numericChart <- function(colName) {
-  ggplot(herringData, aes(x = length, y = herringData[[colName]], color=xmonth)) +
+  ggplot(naMeanHerringData, aes(x = length, y = naMeanHerringData[[colName]], color=xmonth)) +
     geom_jitter(size = 1.5, stat = "identity") +
-    labs(x = "Długość", y = colName)
+    labs(x = "Długość", y = colName) + 
+    theme_bw()
 }
 ```
 
-```{r}
+```{r, cache=TRUE}
 plot_grid(
   numericChart("chel1"),
   numericChart("fbar"),
@@ -256,10 +281,370 @@ plot_grid(
 
 Powiązanie rosnącego `sst` oraz `nao` jasno wpływa negatywnie na długość, przy `fbar` również można dostrzec pozywytną korelację.
 
-Sprawdzmy również zależność pomiędzy miesiącem połowu a długością; w macierzy korelacji nie mogliśmy tego do konca zweryfikować, jednak ze względu na cykliczność było to również utrudnione (miesiąc w tym wypadku jest sztucznie liczbą).
+Sprawdzmy również zależność pomiędzy miesiącem połowu a długością; w macierzy korelacji nie mogliśmy tego do końca zweryfikować, jednak ze względu na cykliczność było to również utrudnione (miesiąc w tym wypadku jest sztucznie liczbą).
 
-```{r}
+```{r, cache=TRUE}
 numericChart("xmonth")
 ```
 Wydaje się, że nie ma żadnej znaczącej zależności pomiędzy miesiącem połowu a długością śledzia
 
+# Predykcja rozmiaru śledzia
+W celu predykcji wykorzystajmy bibliotekę `caret`.
+Podzielmy najpierw zbiór danych na uczące i testowe w relacji 70:30
+```{r, cache=TRUE}
+regHerringData <- filteredHerringDataWithNumericMonth
+inTrain <- createDataPartition(regHerringData$length, p=0.7, list=FALSE)
+training <- regHerringData[inTrain,]
+testing <- regHerringData[-inTrain,]
+
+ggplot(mapping=aes(alpha=0.2)) + 
+ geom_density(aes(length, fill="training", color="training"), training) + 
+ geom_density(aes(length, fill="testing", color="testing"), testing) + 
+ theme_minimal() +
+  xlab("Długość") +
+  ylab("Gęstość") +
+  scale_fill_brewer(palette="Set1") +
+  scale_color_brewer(palette="Set1") + 
+  guides(color = FALSE, alpha = FALSE, fill=guide_legend(override.aes = list(color = NA)))
+```
+Widzimy że zbiory dobrze się pokrywają. Czas przygotować dane
+
+```{r, cache=TRUE}
+X_train = select(training, -length)
+y_train = training$length
+X_test = select(testing, -length)
+y_test = testing$length
+```
+
+Przygotujmy 5-krotną walidację krzyżową (jedynie 5 ze względu na wiele metod oraz długi czas niektórych z nich a także małe różnice w rezultatach)
+
+```{r, cache=TRUE}
+trcontrol = trainControl(
+  method = "cv",
+  number = 5,  
+  allowParallel = TRUE,
+  verboseIter = FALSE,
+  returnData = FALSE
+)
+```
+
+oraz metody pomocnicze
+
+```{r}
+evaluateStats <- function(model) {
+  predicted = predict(model, X_test)
+  residuals = y_test - predicted
+  
+  RMSE <- round(sqrt(mean(residuals^2)), 3)
+  
+  y_testMean = mean(y_test)
+  totalSS =  sum((y_test - y_testMean)^2 )
+  residualSS =  sum(residuals^2)
+  rSquare  =  round(1 - (residualSS/totalSS), 3)
+  
+  list(RMSE = RMSE, rSquare = rSquare)
+}
+```
+
+```{r}
+predictionChart <- function(model) {
+  predicted = predict(model, X_test)
+  mergedResults = as.data.frame(cbind(predicted = predicted, observed = y_test))
+  # Plot predictions vs test data
+  ggplot(mergedResults, aes(y = predicted, x = observed)) +
+    geom_point(color = "darkred", alpha = 0.5) + 
+    geom_smooth(method=lm) +
+    ylab("Przewidziana długość") +
+    xlab("Rzeczywista długość") + 
+    theme(
+      axis.text.y = element_text(size=12), axis.text.x = element_text(size=12,hjust=.5),
+      axis.title.x = element_text(size=14), axis.title.y = element_text(size=14)
+    )
+}
+```
+
+```{r}
+importancePlot <- function(model) ggplot(varImp(model))
+```
+
+W dalszej części dokonamy predykcji za pomocą regresji kilkoma regresorami, jednak ich porównanie oraz wnioski zostawimy na koniec
+
+## Knn
+
+```{r}
+knnGrid <- expand.grid(k = seq(1, 31, by = 2))
+```
+
+```{r}
+knnModel <- train(
+  X_train, y_train,
+  method = "knn",
+  trControl = trcontrol,
+  tuneGrid = knnGrid
+)
+```
+
+### Najlepsze parametry
+```{r, cache=TRUE}
+knnModel$bestTune
+```
+
+
+### Ewaluacja modelu
+
+Błąd średniokwadratowy dla danych testowych oraz wspołczynnik determinacji
+```{r, cache=TRUE}
+knnStats <- evaluateStats(knnModel)
+knnStats
+```
+
+### Weryfikacja predykcji
+
+```{r, cache=TRUE}
+predictionChart(knnModel)
+```
+
+
+## Knn + preprocessing
+```{r}
+knnPreModel <- train(
+  X_train, y_train,
+  method = "knn",
+  trControl = trcontrol,
+  tuneGrid = knnGrid,
+  preProcess = c("center", "scale")
+)
+```
+
+### Najlepsze parametry
+```{r, cache=TRUE}
+knnPreModel$bestTune
+```
+
+### Ewaluacja modelu
+
+Błąd średniokwadratowy dla danych testowych oraz wspołczynnik determinacji
+```{r, cache=TRUE}
+knnPreStats <- evaluateStats(knnPreModel)
+knnPreStats
+```
+
+### Weryfikacja predykcji
+
+```{r, cache=TRUE}
+predictionChart(knnPreModel)
+```
+
+## Random Forest
+```{r}
+rfGrid <- expand.grid(.mtry=sqrt(ncol(X_train)))
+```
+
+```{r}
+rfModel <- train(
+  X_train, y_train,
+  method = "rf",
+  trControl = trcontrol,
+  tuneGrid = rfGrid,
+  importance = TRUE
+)
+```
+
+### Najlepsze parametry
+```{r, cache=TRUE}
+rfModel$bestTune
+```
+
+### Ewaluacja modelu
+
+Błąd średniokwadratowy dla danych testowych oraz wspołczynnik determinacji
+```{r, cache=TRUE}
+rfStats <- evaluateStats(rfModel)
+rfStats
+```
+
+### Weryfikacja predykcji
+
+```{r, cache=TRUE}
+predictionChart(rfModel)
+```
+
+### Ważność parametrów
+```{r}
+importancePlot(rfModel)
+```
+
+Widać, że według *Random Forest* najważniejszym parametrem jest `xmonth`; jest on kilkukrotnie ważniejszy od drugiego w kolejności - `chel1`.
+
+## Extreme Gradient Boosting
+
+Poniższe wartości (`eta`, `gamma`, `min_child_weight` oraz `subsample`) są wartościami domyślnymi w adekwatnej metodzie w [`sklearn`](https://xgboost.readthedocs.io/en/latest/python/python_api.html).
+```{r, cache=TRUE}
+xgbGrid <- expand.grid(
+    nrounds = c(100,200), 
+    max_depth = c(10, 15, 20, 25),
+    colsample_bytree = seq(0.5, 0.9, length.out = 5),
+    eta = 0.1,
+    gamma=0,
+    min_child_weight = 1,
+    subsample = 1
+  )
+```
+
+```{r, cache=TRUE}
+xgbModel <- train(
+  X_train, y_train,
+  trControl = trcontrol,
+  tuneGrid = xgbGrid,
+  method = "xgbTree"
+)
+```
+
+### Najlepsze parametry
+```{r, cache=TRUE}
+xgbModel$bestTune
+```
+
+### Ewaluacja modelu
+
+Błąd średniokwadratowy dla danych testowych oraz wspołczynnik determinacji
+```{r, cache=TRUE}
+xgbStats <- evaluateStats(xgbModel)
+xgbStats
+```
+
+### Weryfikacja predykcji
+
+```{r, cache=TRUE}
+predictionChart(xgbModel)
+```
+
+### Ważność parametrów
+```{r}
+importancePlot(xgbModel)
+```
+W odróżnieniu od `Random Forest` dla `xgb` najważniejszym parametrem jest wielkość połowu; ma to sens - im większy połów, tym większa stabilizacja rozmiaru śledzia, dąży on do średniej. Z ludzkiego pukntu widzenia również można szukać tutaj zależności - większa ryba, więc jest większa chęć do połowu (mniejszy stosunek pracy do zysku, większa zachęta do sprzedaży; lepiej kupić dużą rybę niż małą).
+Dalej prawie dwukrotnie mniej ważny okazuje się być `fbar`. 
+
+## Extreme Gradien Boosting + preprocessing
+
+```{r, cache=TRUE}
+xgbPreModel <- train(
+  X_train, y_train,
+  trControl = trcontrol,
+  tuneGrid = xgbGrid,
+  method = "xgbTree",
+  preProcess = c("center", "scale")
+)
+```
+
+### Najlepsze parametry
+```{r, cache=TRUE}
+xgbPreModel$bestTune
+```
+
+### Ewaluacja modelu
+
+Błąd średniokwadratowy dla danych testowych oraz wspołczynnik determinacji
+```{r, cache=TRUE}
+xgbPreStats <- evaluateStats(xgbPreModel)
+xgbPreStats
+```
+
+### Weryfikacja predykcji
+
+```{r, cache=TRUE}
+predictionChart(xgbPreModel)
+```
+
+### Ważność parametrów
+```{r}
+importancePlot(xgbPreModel)
+```
+Widzimy więc, że skalowanie było w tym wypadku konieczne; dało zupełnie inne wagi parametrów, a przy tym nieznacznie poprawiło predykcję.
+
+# Podsumowanie Regresji
+
+Podsumujmy średnie wyniki 
+```{r}
+compareDf <- data.frame(t(data.frame(
+  knn = unlist(knnStats),
+  knnPre = unlist(knnPreStats),
+  rf = unlist(rfStats),
+  xgb = unlist(xgbStats),
+  xgbPre = unlist(xgbPreStats)
+)))
+compareDf
+```
+Widzimy, że wyniki są bardzo do siebie zbliżone - najbardziej wyróżnia się `xgb`. Możemy również zauważyć, że preprocessing przeprowadzony na `knn` nie przyniósł dużej poprawy; dla `xgb` również nie zwiększył w dużym stopniu miar, jednak całkowicie zmienił ważność parametrów.
+Analizę ważności parametrów można było zastosować tylko dla `Random Forest` oraz `Extreme Gradient Boosting`; wskazały różne wyniki.
+Co prawda przedstawialiśmy już macierz korelacji poszczególnych wartości, jednak zwizualizujmy jeszcze średnie przebiegi zmienności wspomnianych parametrów (`xmonth`, `totaln`, `fbar`, `sst` oraz `chel1`).
+
+Analizując wykresy przedstawiające rzeczywiste dane a wynikające z regresji można stwierdzić, że mniej więcej wyniki się zgadzają, jednak przy wartościach z przedziału 18-32 przewidywanie ich zaledwie w zakresie 22-28 przy odchyleniu około 2 nie wydaje się być satysfakcjonujące.
+
+### Analiza zmian wartości wybranych parametrów
+
+Zestawmy zmiany wyżej wspomnianych wartości (pomijając miesiąc ze względu na brak zachowania chronologii) oraz przedstawiających największą korelację (`sst`, `nao`), uwzględniając uśrednione w ciągu przybliżonego roku wartości długości ryby
+```{r}
+numericMonthAndYearHerring <- mutate(herringDataWithYearByPeriod, xmonth = as.numeric(xmonth))
+baseChart <- meanLengthInYearChart(numericMonthAndYearHerring)
+
+compareWithLengthChange <- function(column, color, fill, coef, offset) {
+  meanData <- statsInYear(numericMonthAndYearHerring, column)
+  baseChart + 
+    geom_ribbon(aes(ymin = (meanData$min - offset)/coef, ymax = (meanData$max - offset)/coef), alpha = 0.3, fill = fill, color = "transparent") +
+    geom_line(aes(y = (meanData$mean - offset)/coef), color = color, lwd = 0.7) + 
+    scale_y_continuous(sec.axis = sec_axis(~.*coef + offset, name = column))
+}
+```
+
+#### Całkowita wielkość połowu (średnia na rok) - `totaln`
+```{r}
+compareWithLengthChange("totaln", "#F44336", "#EF9A9A", 7e4, -1.25e6)
+```
+
+Widać, że przez pierwsze ~15 lat połów był największy, jednak długość również rosła. W latach 15-20 połów spadał, natomiast długość dalej rosła. Ciekawa jest zależność wzrostu połowu w latach 20-25, oraz malejąca tendencja w rozmiarze ryby. Patrząc jednak na dalsze lata raczej nie ma powodu by doszukiwać się związku pomiędzy zmianami tych dwóch wartości.
+
+#### Średnie natężenie połowów w rejonie - `fbar`
+
+```{r}
+ compareWithLengthChange("fbar", "#AB47BC", "#BA68C8", 1e-1, -2.2)
+```
+
+Patrząc na przebieg zmian wartości `fbar` oraz długości śledzia od razu widać zależność; obie wartości rosną od 5-20 roku, później do 25 maleją aby utrzymać podobną tendencję w następnych latach. Zastanawiająca jest jednak rozbieżność w latach 50+, gdzie wzrost wartości `fbar` nie rzutuje na zmianę rozmiaru, choć jego spadek przez ostatnie kilka lat może mieć już na niego wpływ. Możemy więc domniemać o wpływie również innego parametru.
+
+#### Średnia dostępność planktonu *Calanus helgolandicus gat. 1* - `chel1`
+```{r}
+ compareWithLengthChange("chel1", "#42A5F5", "#4FC3F7", 10, -230)
+```
+
+Podobnie jak w przypadku parametru `fbar` szybko można dostrzec korelację pomiędzy `chel1` oraz długością ryby. Wydaje się również, że zależność jest nieco przesunięta w czasie, tzn. wpływ zmiany wartości `chel1` widać dopiero po niewielkim upływie czasu w rozmiarze. Widać, że w okresach największej wartości tego parametru, tj. 10-20 lat rozmiar śledzia również był największy, w gwałtownego spadku (lata ~20) rozmiar również zaczął gwałtownie spadać, jednak znacznie wolniej. Przez następne 15 lat nastepowały wahania tego parametru dochodząc jednak do wysokich wartości, jednak po roku 35, gdy zaczał utrzymywać się na niskim poziomie, widać utrzymującą się tendencję spadkową w rozmiarze. Biorąc pod uwagę, że plankton jest pożywieniem śledzia możemy podjąć rozumowanie, że te systematycznie przystosowują się do zaistniałych warunków.
+
+#### Średnia temperatura przy powierzchni wody - `sst`
+```{r}
+ compareWithLengthChange("sst", "#F57C00", "#FFE082", 1/4, 7)
+```
+
+Dla tego parametru widać z kolei ujemną korelację, przy czym wysoką. Widzimy pewne wahania, jednak w ogólności od roku 25 jego wartość rośnie, w przeciwieństwie do rozmiaru ryby.
+
+#### Średnia wartość oscylacji północnoatlantyckiej - `nao`
+```{r}
+compareWithLengthChange("nao", "#607D8B", "#BDBDBD", 1, -25)
+```
+
+Podobnie jak w przypadku wcześniej omawianego parametru widać silną przeciwną korelację, szczególnie mogącą oddziaływać do roku 20, jednak przez ostatnie przez ostatnie lata wartość ta utrzymuje się zgrubsza na podobnym poziomie, przy ciągłym spadku długości śledzia. Możliwe, że mała wartość sprzyja wzrostu (do pewnej wartości), natomiast wysoka w dłuższej perspektywnie negatywnie wpływa na długość.
+
+# Podsumowanie i wnioski
+Analiza wartości za pomocą macierzy korelacji okazała się dosyć skuteczna wskazując na ciekawych kandydatów mogących wpływać na zmianę rozmiaru ryby w ostatnich latach. Dzięki niej możemy domniemać o dużym udziale parametrów `sst`, `fbar` oraz `nao` w zmianie rozmiaru ryby. Co więcej, pierwsze dwie z nich zostały również uznane za jedne z najważniejszych przez najlepiej przewidujący regresor *Extreme Gradient Boosting* przy zastosowaniu przetwarzania wstępnego ze skalowaniem i środkowaniem wartości parametrów - ich dziedziny są od siebie bardzo różne. Możemy również domniemać o wpływie `chel1`, jednak obserwacja bazuje jedynie na analizie korelacji zmian obu wartości.
+
+# Źródła
+- [Treść zadania](http://www.cs.put.poznan.pl/alabijak/emd/projekt/projekt_analiza.html)
+- [Originalne dane](https://github.com/lyashevska/gbrt-herring-length)
+- [Create predictive models in R with Caret](https://towardsdatascience.com/create-predictive-models-in-r-with-caret-12baf9941236)
+- [Caret Documentation](https://daviddalpiaz.github.io/r4sl/the-caret-package.html)
+- [Knn training in R using Caret package](https://dataaspirant.com/2017/01/09/knn-implementation-r-using-caret-package/)
+- [Caret practice - Random Forest](https://rpubs.com/phamdinhkhanh/389752)
+- [Extreme Gradieng Boosting in Caret](https://datascienceplus.com/extreme-gradient-boosting-with-r/?fbclid=IwAR0Ld3dCvjogSLPw5IH_yV6Ak4h7dWJN37-Ob3IzWW7QzaE-iWrvYZtpvVI)
+- [Magic Documentation](https://cran.r-project.org/web/packages/magick/vignettes/intro.html)
+- [Plots tutorial in R](https://cedricscherer.netlify.com/2019/08/05/a-ggplot2-tutorial-for-beautiful-plotting-in-r/)
+- Niezliczona liczba postów na Stack Overflow
